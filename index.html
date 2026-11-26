@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Look Away Style Beat Testbench</title>
+<style>
+  :root { color-scheme: dark; --bg: #0b0b10; --fg: #e8e8f0; --muted: #8a8aa0; --accent: #b56cff; --accent2: #5ce1e6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  main { width: min(640px, 100%); display: grid; gap: 20px; }
+  h1 { margin: 0; font-size: 1.6rem; }
+  p.lead { margin: 0; color: var(--muted); line-height: 1.5; }
+  .controls { display: grid; gap: 12px; }
+  button { font: inherit; cursor: pointer; border-radius: 14px; border: 2px solid var(--accent); background: transparent; color: var(--fg); padding: 18px 22px; font-size: 1.25rem; font-weight: 700; min-height: 64px; }
+  button:hover { background: rgba(181, 108, 255, 0.12); }
+  button:focus-visible { outline: 3px solid var(--accent2); outline-offset: 3px; }
+  button[aria-pressed="true"] { background: var(--accent); color: #0b0b10; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  button.secondary { border-color: var(--accent2); font-size: 1rem; min-height: 52px; }
+  button.secondary:hover { background: rgba(92, 225, 230, 0.12); }
+  .status { min-height: 1.4em; color: var(--muted); font-size: 0.95rem; }
+  section { border: 1px solid #23232f; border-radius: 14px; padding: 16px; background: #10101a; }
+  section h2 { margin: 0 0 8px; font-size: 1rem; color: var(--accent2); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 0.92rem; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .meter { height: 10px; border-radius: 6px; background: #1d1d2a; overflow: hidden; margin-top: 6px; }
+  .meter > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width 60ms linear; }
+  .bar-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+  .bar-grid span { height: 26px; border-radius: 6px; background: #1d1d2a; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: var(--muted); }
+  .bar-grid span.active { background: var(--accent); color: #0b0b10; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Look Away Style Beat Testbench</h1>
+    <p class="lead">Live Web Audio synthesis: 140 BPM, 8-bar loop, Am - Fm - Dm - Em. Dark trap / phonk / pluggnb vibe.</p>
+  </header>
+
+  <div class="controls">
+    <button id="playBtn" type="button" aria-pressed="false">Play</button>
+    <button id="exportBtn" class="secondary" type="button" disabled>Export loop as .wav</button>
+  </div>
+
+  <p id="status" class="status" role="status" aria-live="polite">Press Play to start. The audio engine unlocks on your first tap.</p>
+
+  <section aria-labelledby="transport-title">
+    <h2 id="transport-title">Transport</h2>
+    <div class="bar-grid" id="barGrid" aria-hidden="true"></div>
+    <dl>
+      <dt>Tempo</dt><dd>140 BPM</dd>
+      <dt>Loop</dt><dd>8 bars, 13.714 s</dd>
+      <dt>Chords</dt><dd>Am, Fm, Dm, Em (2 bars each)</dd>
+      <dt>Output</dt><dd id="outInfo">Not rendered yet</dd>
+    </dl>
+    <div class="meter" aria-hidden="true"><span id="meterBar"></span></div>
+  </section>
+
+  <section aria-labelledby="engine-title">
+    <h2 id="engine-title">Synthesis engine</h2>
+    <dl>
+      <dt>Pad</dt><dd>Detuned sine stacks, 4.5 Hz tremolo</dd>
+      <dt>Kick</dt><dd>Sine with fast pitch drop, soft clip</dd>
+      <dt>808</dt><dd>Sine with 2nd harmonic, pitch slide, saturation</dd>
+      <dt>Snare / clap</dt><dd>Filtered noise with snare body; clap layered on beat 4</dd>
+      <dt>Hats</dt><dd>16th notes, accents, 6-hit stutter roll each bar</dd>
+      <dt>Master</dt><dd>Normalized to 0.89 peak, soft limiter</dd>
+    </dl>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Constants ----------
+  var SR = 44100, BPM = 140, BARS = 8;
+  var BEAT = 60 / BPM, STEP = BEAT / 4;
+  var TOTAL = Math.round(BARS * 4 * BEAT * SR);
+  var TAU = 2 * Math.PI;
+  var CHORDS = [
+    { r: 55.0,  tones: [57, 60, 64], pl: [69, 72, 76] }, // Am
+    { r: 43.65, tones: [53, 56, 60], pl: [65, 68, 72] }, // Fm
+    { r: 73.42, tones: [50, 53, 57], pl: [62, 65, 69] }, // Dm
+    { r: 82.41, tones: [52, 55, 59], pl: [64, 67, 71] }  // Em
+  ];
+
+  // ---------- DOM ----------
+  var playBtn = document.getElementById('playBtn');
+  var exportBtn = document.getElementById('exportBtn');
+  var statusEl = document.getElementById('status');
+  var meterBar = document.getElementById('meterBar');
+  var barGrid = document.getElementById('barGrid');
+  var outInfo = document.getElementById('outInfo');
+
+  for (var b = 0; b < BARS; b++) {
+    var cell = document.createElement('span');
+    cell.textContent = String(b + 1);
+    barGrid.appendChild(cell);
+  }
+
+  // ---------- Synthesis (offline render into Float32 channels) ----------
+  function mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+  function soft(x) { return x / (1 + Math.abs(x)); }
+  function cnt(sec) { return Math.round(sec * SR); }
+
+  function renderLoop() {
+    var L = new Float32Array(TOTAL), R = new Float32Array(TOTAL);
+    var seed = 12345;
+    function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    // Wrap-around write so tails loop seamlessly
+    function add(k, s, pan) {
+      pan = pan || 0;
+      var i = ((k % TOTAL) + TOTAL) % TOTAL;
+      L[i] += s * (1 - pan) * 0.7;
+      R[i] += s * (1 + pan) * 0.7;
+    }
+
+    function kick(t0, amp) {
+      var ph = 0, st = Math.round(t0 * SR), n = cnt(0.45);
+      for (var i = 0; i < n; i++) {
+        var t = i / SR;
+        ph += TAU * (42 + 110 * Math.exp(-t * 30)) / SR;
+        add(st + i, soft(Math.sin(ph) * Math.exp(-t * 6.5) * 2.2) * amp, 0);
+      }
+    }
+    function bass808(t0, f0, f1, dur, amp) {
+      var ph = 0, st = Math.round(t0 * SR), n = cnt(dur);
+      for (var i = 0; i < n; i++) {
+        var t = i / SR;
+        var f = f1 + (f0 - f1) * Math.exp(-t * 45);
+        ph += TAU * f / SR;
+        var env = Math.min(1, t / 0.004) * Math.min(1, (dur - t) / 0.06) * Math.exp(-t * 1.6);
+        add(st + i, soft((Math.sin(ph) + 0.2 * Math.sin(2 * ph)) * 3.0) * env * amp, 0);
+      }
+    }
+    function hat(t0, vel, pan) {
+      var prev = 0, st = Math.round(t0 * SR), n = cnt(0.05);
+      for (var i = 0; i < n; i++) {
+        var x = rnd() * 2 - 1, hp = x - prev;
+        prev = x;
+        add(st + i, hp * Math.exp(-(i / SR) * 110) * vel * 0.2, pan);
+      }
+    }
+    function snare(t0, amp, clap) {
+      var prev = 0, st = Math.round(t0 * SR), n = cnt(0.3);
+      for (var i = 0; i < n; i++) {
+        var t = i / SR, x = rnd() * 2 - 1, hp = x - prev;
+        prev = x * 0.6 + prev * 0.4;
+        var nz = hp * Math.exp(-t * (clap ? 28 : 16)) * 0.5;
+        var body = clap ? 0 : Math.sin(TAU * 185 * t) * Math.exp(-t * 32) * 0.6;
+        add(st + i, (nz + body) * amp, clap ? 0.1 : 0);
+      }
+    }
+    function pad(t0, dur, midis, amp) {
+      var st = Math.round(t0 * SR), n = cnt(dur), fr = midis.map(mtof);
+      for (var i = 0; i < n; i++) {
+        var t = i / SR;
+        var env = Math.min(1, t / 0.35) * Math.min(1, (dur - t) / 0.4);
+        var trem = 0.85 + 0.15 * Math.sin(TAU * 4.5 * t);
+        var s = 0;
+        for (var j = 0; j < fr.length; j++) {
+          var f = fr[j];
+          s += Math.sin(TAU * f * 1.003 * t) + Math.sin(TAU * f * 0.997 * t) + 0.2 * Math.sin(TAU * f * 2 * t);
+        }
+        add(st + i, s * env * trem * amp / fr.length, 0.1);
+      }
+    }
+    function pluck(t0, f, amp, pan) {
+      var st = Math.round(t0 * SR), n = cnt(0.42);
+      for (var i = 0; i < n; i++) {
+        var t = i / SR;
+        add(st + i, (Math.sin(TAU * f * t) + 0.3 * Math.sin(TAU * 2 * f * t)) * Math.exp(-t * 9) * amp, pan);
+      }
+    }
+
+    for (var bar = 0; bar < BARS; bar++) {
+      var b0 = bar * 4 * BEAT;
+      var c = CHORDS[Math.floor(bar / 2)];
+      var v = bar % 2;
+      pad(b0, 4 * BEAT, c.tones, 0.08);
+      var kicks = v ? [0, 7, 10, 14] : [0, 6, 10];
+      for (var k = 0; k < kicks.length; k++) kick(b0 + kicks[k] * STEP, 0.85);
+      snare(b0 + 4 * STEP, 0.7, false);
+      snare(b0 + 12 * STEP, 0.5, true);
+      if (v) {
+        bass808(b0 + 10 * STEP, c.r, c.r * 1.5, 2 * STEP, 0.9);
+        bass808(b0, c.r, c.r * 1.01, 6 * STEP, 0.9);
+      } else {
+        bass808(b0, c.r, c.r * 1.01, 8 * STEP, 0.9);
+      }
+      for (var s16 = 0; s16 < 16; s16++) {
+        hat(b0 + s16 * STEP, (s16 % 4 === 2 ? 1 : 0.6) * (0.8 + 0.4 * rnd()), (s16 % 2 ? 0.3 : -0.3));
+      }
+      for (var r = 0; r < 6; r++) hat(b0 + 14 * STEP + r * STEP / 6, 0.5 + 0.1 * r, 0);
+      if (v) {
+        pluck(b0 + 2.5 * STEP, mtof(c.pl[0]), 0.09, -0.3);
+        pluck(b0 + 9 * STEP, mtof(c.pl[1]), 0.08, 0.3);
+      }
+    }
+
+    // Normalize to 0.89 peak, then soft limit at output
+    var peak = 0;
+    for (var i = 0; i < TOTAL; i++) peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));
+    var g = peak > 0 ? 0.89 / peak : 1;
+    for (var j2 = 0; j2 < TOTAL; j2++) {
+      L[j2] = soft(L[j2] * g * 1.2);
+      R[j2] = soft(R[j2] * g * 1.2);
+    }
+    return { left: L, right: R, peak: peak };
+  }
+
+  // ---------- Audio state ----------
+  var audioCtx = null;
+  var loopBuffer = null;
+  var rendered = null;
+  var source = null;
+  var playing = false;
+  var rafId = 0;
+  var startTime = 0;
+
+  function ensureContext() {
+    if (!audioCtx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AC();
+    }
+    return audioCtx;
+  }
+
+  // iOS unlock: resume inside the user gesture and play a silent buffer
+  function unlockAudio(ctx) {
+    var p = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+    try {
+      var silent = ctx.createBuffer(1, 1, ctx.sampleRate);
+      var s = ctx.createBufferSource();
+      s.buffer = silent;
+      s.connect(ctx.destination);
+      s.start(0);
+    } catch (e) { /* ignore */ }
+    return p;
+  }
+
+  function buildLoopBuffer(ctx) {
+    if (!loopBuffer || loopBuffer.sampleRate !== ctx.sampleRate) {
+      if (!rendered) {
+        setStatus('Rendering loop...');
+        rendered = renderLoop();
+        outInfo.textContent = 'Rendered ' + TOTAL + ' frames at ' + SR + ' Hz, peak ' + rendered.peak.toFixed(3);
+        exportBtn.disabled = false;
+      }
+      loopBuffer = ctx.createBuffer(2, TOTAL, SR);
+      loopBuffer.copyToChannel(rendered.left, 0);
+      loopBuffer.copyToChannel(rendered.right, 1);
+    }
+    return loopBuffer;
+  }
+
+  function startPlayback() {
+    var ctx = ensureContext();
+    unlockAudio(ctx).then(function () {
+      buildLoopBuffer(ctx);
+      stopSource();
+      source = ctx.createBufferSource();
+      source.buffer = loopBuffer;
+      source.loop = true;
+      source.connect(ctx.destination);
+      startTime = ctx.currentTime;
+      source.start(0);
+      playing = true;
+      updateButton();
+      setStatus('Playing. Tap again to pause.');
+      tick();
+    }).catch(function (err) {
+      setStatus('Could not start audio: ' + (err && err.message ? err.message : err));
+    });
+  }
+
+  function stopSource() {
+    if (source) {
+      try { source.stop(); } catch (e) { /* already stopped */ }
+      source.disconnect();
+      source = null;
+    }
+  }
+
+  function pausePlayback() {
+    stopSource();
+    playing = false;
+    cancelAnimationFrame(rafId);
+    meterBar.style.width = '0%';
+    updateButton();
+    setStatus('Paused.');
+  }
+
+  function tick() {
+    if (!playing || !audioCtx) return;
+    var loopLen = TOTAL / SR;
+    var pos = ((audioCtx.currentTime - startTime) % loopLen + loopLen) % loopLen;
+    var bar = Math.floor(pos / (4 * BEAT));
+    var beatPhase = (pos % BEAT) / BEAT;
+    // Visual pulse: envelope on each beat
+    meterBar.style.width = (100 * Math.exp(-beatPhase * 5)).toFixed(1) + '%';
+    var cells = barGrid.children;
+    for (var i = 0; i < cells.length; i++) {
+      if (i === bar) cells[i].classList.add('active'); else cells[i].classList.remove('active');
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function updateButton() {
+    playBtn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+    playBtn.textContent = playing ? 'Pause' : 'Play';
+  }
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  playBtn.addEventListener('click', function () {
+    if (playing) pausePlayback(); else startPlayback();
+  });
+
+  // ---------- WAV export (16-bit PCM stereo, 44.1 kHz) ----------
+  function encodeWav(left, right, sampleRate) {
+    var numCh = 2, bytesPer = 2, n = left.length;
+    var dataLen = n * numCh * bytesPer;
+    var buf = new ArrayBuffer(44 + dataLen);
+    var dv = new DataView(buf);
+    function writeStr(off, s) { for (var i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); }
+    writeStr(0, 'RIFF');
+    dv.setUint32(4, 36 + dataLen, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true);
+    dv.setUint16(22, numCh, true);
+    dv.setUint32(24, sampleRate, true);
+    dv.setUint32(28, sampleRate * numCh * bytesPer, true);
+    dv.setUint16(32, numCh * bytesPer, true);
+    dv.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    dv.setUint32(40, dataLen, true);
+    var off = 44;
+    for (var i2 = 0; i2 < n; i2++) {
+      var l = Math.max(-1, Math.min(1, left[i2]));
+      var r = Math.max(-1, Math.min(1, right[i2]));
+      dv.setInt16(off, l < 0 ? l * 0x8000 : l * 0x7fff, true); off += 2;
+      dv.setInt16(off, r < 0 ? r * 0x8000 : r * 0x7fff, true); off += 2;
+    }
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  exportBtn.addEventListener('click', function () {
+    var ctx = ensureContext();
+    buildLoopBuffer(ctx);
+    var blob = encodeWav(rendered.left, rendered.right, SR);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'look_away_style_beat_140bpm.wav';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+    setStatus('Downloaded look_away_style_beat_140bpm.wav (' + Math.round(blob.size / 1024) + ' KB).');
+  });
+})();
+</script>
+</body>
+</html>
